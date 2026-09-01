@@ -1,0 +1,105 @@
+# evaluation/config/eval_config.yaml
+evaluation:
+  # 基础配置
+  model:
+    path: "./Qwen2.5-0.5B"
+    adapter_path: "./output/final-lora"
+    trust_remote_code: true
+    torch_dtype: "bfloat16"
+    device_map: "auto"
+    max_memory: "8GB"
+
+  # 数据集配置
+  datasets:
+    - name: "custom_eval"
+      path: "./data/eval.jsonl"
+      format: "chatml"
+      max_samples: 1000
+    - name: "ceval"
+      path: "ceval/ceval-exam"
+      subset: "all"
+      max_samples: 500
+    - name: "gsm8k"
+      path: "gsm8k"
+      max_samples: 200
+
+  # 生成配置
+  generation:
+    max_new_tokens: 1024
+    temperature: 0.7
+    top_p: 0.9
+    top_k: 50
+    do_sample: true
+    repetition_penalty: 1.1
+    num_beams: 1
+    batch_size: 8
+    max_length: 4096
+
+  # 评估指标配置
+  metrics:
+    automated:
+      - "perplexity"
+      - "accuracy"
+      - "f1_score"
+      - "bleu"
+      - "rouge_l"
+      - "meteor"
+    model_based:
+      - "llm_judge"
+      - "refusal_rate"
+      - "relevance_score"
+    safety:
+      - "toxicity_score"
+      - "bias_score"
+      - "hallucination_rate"
+    performance:
+      - "latency_p50"
+      - "latency_p95"
+      - "latency_p99"
+      - "throughput"
+      - "memory_usage"
+
+  # LLM-as-Judge 配置
+  llm_judge:
+    model: "gpt-4"
+    temperature: 0.3
+    max_retries: 3
+    timeout: 30
+    criteria:
+      - "relevance"
+      - "coherence"
+      - "factuality"
+      - "helpfulness"
+      - "safety"
+    scoring_scale: "1-5"
+
+  # 并行配置
+  parallel:
+    enabled: true
+    num_workers: 4
+    use_ray: false
+    max_concurrent: 4
+
+  # 缓存配置
+  cache:
+    enabled: true
+    backend: "sqlite"
+    ttl: 86400
+    max_size: "10GB"
+
+  # 输出配置
+  output:
+    dir: "./results"
+    format: ["json", "csv", "html"]
+    save_predictions: true
+    save_embeddings: false
+
+  # 监控配置
+  monitoring:
+    enabled: true
+    use_wandb: true
+    wandb_project: "qwen-finetune-eval"
+    use_tensorboard: true
+    log_interval: 10
+    alert_on_degradation: true
+    degradation_threshold: 0.05
