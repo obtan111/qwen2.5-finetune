@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Qwen 2.5 企业级微调脚本
-支持 LoRA/QLoRA 训练、评估和报告生成
+Qwen 2.5 微调训练脚本 (训练 + 验证)
+支持 LoRA/QLoRA 训练, 训练后在验证集上评估, 结果全部保存到本地
+测试集评估请使用 test.py
 """
 
 import os
 import sys
 import json
+import math
 import logging
 import argparse
 from pathlib import Path
@@ -36,24 +38,24 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Qwen 2.5 Fine-tuning")
     
     # 模型参数
-    parser.add_argument("--model_path", type=str, default="./Qwen2.5-0.5B",
+    parser.add_argument("--model_path", type=str, default="./models/Qwen2.5-0.5B",
                        help="模型路径或 HuggingFace 模型 ID")
     parser.add_argument("--output_dir", type=str, default="./output",
                        help="输出目录")
     
     # 数据参数
-    parser.add_argument("--data_path", type=str, required=True,
-                       help="训练数据路径 (jsonl 格式)")
-    parser.add_argument("--eval_data_path", type=str, default=None,
-                       help="评估数据路径")
-    parser.add_argument("--max_seq_length", type=int, default=2048,
-                       help="最大序列长度")
+    parser.add_argument("--data_path", type=str, default="./data/ecd/train_10k.jsonl",
+                       help="训练数据路径 (默认 1 万条抽样, 全量用 ./data/ecd/train.jsonl)")
+    parser.add_argument("--eval_data_path", type=str, default="./data/ecd/eval.jsonl",
+                       help="验证数据路径 (训练中/后评估)")
+    parser.add_argument("--max_seq_length", type=int, default=1024,
+                       help="最大序列长度 (ECD 最长样本约 1000 token, 1024 足够且省显存)")
     
     # 训练参数
-    parser.add_argument("--num_epochs", type=int, default=3,
-                       help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=8,
-                       help="批大小")
+    parser.add_argument("--num_epochs", type=int, default=1,
+                       help="训练轮数 (GTX 1660 SUPER 上 1 万条约 4-6 小时/轮, 先 1 轮看效果)")
+    parser.add_argument("--batch_size", type=int, default=16,
+                       help="批大小 (ECD 短文本, 16 可提升 GPU 利用率)")
     parser.add_argument("--learning_rate", type=float, default=2e-4,
                        help="学习率")
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine",
@@ -62,8 +64,8 @@ def parse_args():
                        help="预热比例")
     parser.add_argument("--weight_decay", type=float, default=0.01,
                        help="权重衰减")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=2,
-                       help="梯度累积步数")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                       help="梯度累积步数 (batch 16 时无需累积)")
     
     # LoRA 参数
     parser.add_argument("--use_lora", action="store_true", default=True,
@@ -76,31 +78,32 @@ def parse_args():
                        help="LoRA dropout")
     
     # 量化参数
-    parser.add_argument("--use_qlora", action="store_true",
+    parser.add_argument("--use_qlora", action="store_true", default=False,
                        help="是否使用 QLoRA (4-bit 量化)")
-    parser.add_argument("--load_in_4bit", action="store_true",
+    parser.add_argument("--load_in_4bit", action="store_true", default=False,
                        help="是否以 4-bit 加载模型")
-    parser.add_argument("--load_in_8bit", action="store_true",
+    parser.add_argument("--load_in_8bit", action="store_true", default=False,
                        help="是否以 8-bit 加载模型")
     
     # 监控参数
-    parser.add_argument("--use_wandb", action="store_true",
-                       help="是否使用 WandB")
-    parser.add_argument("--wandb_project", type=str, default="qwen-finetune",
-                       help="WandB 项目名")
-    parser.add_argument("--logging_steps", type=int, default=10,
+    parser.add_argument("--logging_steps", type=int, default=50,
                        help="日志间隔步数")
-    parser.add_argument("--eval_steps", type=int, default=50,
-                       help="评估间隔步数")
-    parser.add_argument("--save_steps", type=int, default=100,
-                       help="保存间隔步数")
+    parser.add_argument("--eval_steps", type=int, default=250,
+                       help="验证间隔步数 (1 万条 batch16 约 625 步/轮)")
+    parser.add_argument("--save_steps", type=int, default=500,
+                       help="保存间隔步数 (仅 save_strategy=steps 时生效)")
+    parser.add_argument("--save_strategy", type=str, default="epoch",
+                       choices=["epoch", "steps", "no"],
+                       help="检查点保存策略 (epoch=每轮保存, steps=按步保存, no=不保存)")
+    parser.add_argument("--save_total_limit", type=int, default=None,
+                       help="最多保留检查点数 (默认不限制, LoRA 检查点很小)")
     
     # 其他参数
     parser.add_argument("--seed", type=int, default=42,
                        help="随机种子")
-    parser.add_argument("--fp16", action="store_true",
+    parser.add_argument("--fp16", action="store_true", default=True,
                        help="是否使用 FP16")
-    parser.add_argument("--bf16", action="store_true", default=True,
+    parser.add_argument("--bf16", action="store_true", default=False,
                        help="是否使用 BF16")
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True,
                        help="是否使用梯度检查点")
@@ -108,19 +111,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def setup_wandb(args):
-    """设置 WandB"""
-    if args.use_wandb:
-        try:
-            import wandb
-            wandb.init(
-                project=args.wandb_project,
-                name=f"qwen2.5-0.5b-lora-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                config=vars(args)
-            )
-            logger.info("WandB initialized")
-        except ImportError:
-            logger.warning("wandb not installed, skipping")
+def get_dataset_name(data_path: str) -> str:
+    """从数据路径提取数据集名: ./data/ecd/train.jsonl -> ecd"""
+    p = Path(data_path)
+    name = p.parent.name
+    if name in ("data", ".", "..", ""):
+        name = p.stem
+    return name
 
 
 def load_and_preprocess_data(data_path: str, tokenizer, max_seq_length: int):
@@ -137,22 +134,36 @@ def load_and_preprocess_data(data_path: str, tokenizer, max_seq_length: int):
     
     # 预处理
     def preprocess(examples):
+        # 支持 ChatML (messages) 和 prompt/reference 两种格式
         texts = []
-        for messages in examples.get('messages', []):
-            if messages:
+        if 'messages' in examples and examples['messages']:
+            # ChatML 格式
+            for messages in examples['messages']:
+                if messages:
+                    text = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=False
+                    )
+                    texts.append(text)
+                else:
+                    texts.append("")
+        else:
+            # prompt/reference 格式 -> 包装为对话后套用 chat template
+            prompts = examples.get('prompt') or examples.get('instruction') or []
+            references = (examples.get('reference') or examples.get('answer')
+                          or examples.get('output') or [])
+            for prompt, reference in zip(prompts, references):
+                messages = [
+                    {"role": "user", "content": prompt or ""},
+                    {"role": "assistant", "content": reference or ""},
+                ]
                 text = tokenizer.apply_chat_template(
                     messages,
                     tokenize=False,
                     add_generation_prompt=False
                 )
                 texts.append(text)
-            else:
-                # 尝试使用 prompt/reference 格式
-                prompt = examples.get('prompt', [''])[0]
-                reference = examples.get('reference', [''])[0]
-                if prompt:
-                    text = f"User: {prompt}\nAssistant: {reference}"
-                    texts.append(text)
         
         return {"text": texts}
     
@@ -184,7 +195,7 @@ def setup_model_and_tokenizer(args):
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
         )
     elif args.load_in_8bit:
@@ -227,8 +238,17 @@ def setup_model_and_tokenizer(args):
     return model, tokenizer
 
 
-def setup_training_args(args):
+def setup_training_args(args, num_train_samples=None):
     """设置训练参数"""
+    # transformers 5.x 已移除 warmup_ratio, 需换算为 warmup_steps
+    warmup_steps = 0
+    if num_train_samples:
+        steps_per_epoch = max(1, math.ceil(
+            num_train_samples / (args.batch_size * args.gradient_accumulation_steps)
+        ))
+        total_steps = steps_per_epoch * args.num_epochs
+        warmup_steps = int(total_steps * args.warmup_ratio)
+    
     training_args = SFTConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.num_epochs,
@@ -236,23 +256,22 @@ def setup_training_args(args):
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         lr_scheduler_type=args.lr_scheduler_type,
-        warmup_ratio=args.warmup_ratio,
+        warmup_steps=warmup_steps,
         weight_decay=args.weight_decay,
         bf16=args.bf16,
         fp16=args.fp16,
         logging_steps=args.logging_steps,
         eval_strategy="steps" if args.eval_data_path else "no",
         eval_steps=args.eval_steps if args.eval_data_path else None,
-        save_strategy="steps",
+        save_strategy=args.save_strategy,
         save_steps=args.save_steps,
-        save_total_limit=3,
-        report_to="wandb" if args.use_wandb else "tensorboard",
-        max_seq_length=args.max_seq_length,
+        save_total_limit=args.save_total_limit,
+        report_to="tensorboard",
+        max_length=args.max_seq_length,
         dataset_text_field="text",
         optim="paged_adamw_8bit" if (args.use_qlora or args.load_in_4bit) else "adamw_torch",
         gradient_checkpointing=args.gradient_checkpointing,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        group_by_length=True,
         seed=args.seed,
     )
     
@@ -264,11 +283,13 @@ def train(args):
     logger.info("Starting training...")
     logger.info(f"Arguments: {vars(args)}")
     
-    # 设置 WandB
-    setup_wandb(args)
-    
-    # 创建输出目录
+    # 创建本次运行的输出目录: {数据集名}_train_{时间戳} (每次训练独立, 不覆盖历史结果)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dataset_name = get_dataset_name(args.data_path)
+    run_dir = Path(args.output_dir) / f"{dataset_name}_train_{timestamp}"
+    args.output_dir = str(run_dir)
     os.makedirs(args.output_dir, exist_ok=True)
+    logger.info(f"Run directory: {args.output_dir}")
     
     # 加载模型
     model, tokenizer = setup_model_and_tokenizer(args)
@@ -289,8 +310,8 @@ def train(args):
             args.max_seq_length
         )['train']
     
-    # 训练参数
-    training_args = setup_training_args(args)
+    # 训练参数 (传入样本数用于换算 warmup_steps)
+    training_args = setup_training_args(args, num_train_samples=len(dataset['train']))
     
     # 创建训练器
     trainer = SFTTrainer(
@@ -318,54 +339,30 @@ def train(args):
         json.dump(vars(args), f, indent=2, default=str)
     logger.info(f"Training config saved to {config_path}")
     
+    # 保存训练历史 (loss 曲线、学习率等) 到本地 JSON
+    history_path = f"{args.output_dir}/train_history.json"
+    with open(history_path, 'w') as f:
+        json.dump(trainer.state.log_history, f, indent=2, default=str)
+    logger.info(f"Training history saved to {history_path}")
+    
+    # 本地评估: 验证集
+    if eval_dataset is not None:
+        logger.info("Evaluating on eval dataset...")
+        eval_results = trainer.evaluate(eval_dataset=eval_dataset)
+        eval_path = f"{args.output_dir}/eval_results.json"
+        with open(eval_path, 'w') as f:
+            json.dump(eval_results, f, indent=2, default=str)
+        logger.info(f"Eval results saved to {eval_path}")
+    
     return model, tokenizer
-
-
-def evaluate(args):
-    """评估"""
-    logger.info("Starting evaluation...")
-    
-    sys.path.insert(0, str(Path(__file__).parent))
-    
-    from evaluation.core import EvalEngine
-    from evaluation.datasets import BenchmarkRunner
-    
-    # 加载评估配置
-    config_path = Path(__file__).parent / "evaluation" / "config" / "eval_config.yaml"
-    if config_path.exists():
-        eval_engine = EvalEngine(str(config_path))
-        benchmark_runner = BenchmarkRunner(eval_engine)
-        
-        # 运行评估
-        import asyncio
-        results = asyncio.run(benchmark_runner.run_all_benchmarks(
-            model_path=f"{args.output_dir}/final",
-            benchmarks=["ceval", "gsm8k"]
-        ))
-        
-        # 保存结果
-        output_path = Path(args.output_dir) / "evaluation_results.json"
-        with open(output_path, 'w') as f:
-            json.dump(results, f, indent=2, default=str)
-        
-        logger.info(f"Evaluation results saved to {output_path}")
-    else:
-        logger.warning("Evaluation config not found, skipping evaluation")
 
 
 def main():
     """主函数"""
     args = parse_args()
     
-    # 训练
-    model, tokenizer = train(args)
-    
-    # 评估（可选）
-    if not args.use_wandb:  # 如果没有用 wandb，执行评估
-        try:
-            evaluate(args)
-        except Exception as e:
-            logger.error(f"Evaluation failed: {e}")
+    # 训练 + 验证 (结果保存到本地, 测试集评估请用 test.py)
+    train(args)
     
     logger.info("All done!")
 

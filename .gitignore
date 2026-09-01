@@ -41,6 +41,12 @@ results/
 logs/
 cache/
 
+# ECD 原始语料 (train.txt 单文件 257MB, 超 GitHub 100MB 限制)
+dataset/
+
+# datasets 下载缓存
+data/hf_cache/
+
 # Data (keep sample, ignore large datasets)
 data/*.jsonl
 data/*.json
