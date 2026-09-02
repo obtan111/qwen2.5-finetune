@@ -95,9 +95,13 @@ def parse_args():
                        help="系统提示")
     parser.add_argument("--max_new_tokens", type=int, default=256,
                        help="单次最大生成 token 数")
-    parser.add_argument("--temperature", type=float, default=0.7,
+    parser.add_argument("--temperature", type=float, default=0.6,
                        help="采样温度 (0 = greedy)")
     parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--repetition_penalty", type=float, default=1.15,
+                       help="重复惩罚, 抑制复读 (1.0 = 关闭)")
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=4,
+                       help="禁止 n-gram 连续重复 (0 = 关闭)")
     parser.add_argument("--history_turns", type=int, default=5,
                        help="保留最近 N 轮历史")
     parser.add_argument("--fp16", action="store_true", default=True)
@@ -169,6 +173,8 @@ def main():
                 do_sample=args.temperature > 0,
                 temperature=max(args.temperature, 1e-5),
                 top_p=args.top_p,
+                repetition_penalty=args.repetition_penalty,
+                no_repeat_ngram_size=args.no_repeat_ngram_size or None,
                 pad_token_id=tokenizer.pad_token_id,
             )
         dt = time.perf_counter() - t0
