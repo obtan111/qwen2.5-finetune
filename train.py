@@ -52,7 +52,7 @@ def parse_args():
                        help="最大序列长度 (ECD 最长样本约 1000 token, 1024 足够且省显存)")
     
     # 训练参数
-    parser.add_argument("--num_epochs", type=int, default=1,
+    parser.add_argument("--num_epochs", type=int, default=3,
                        help="训练轮数 (GTX 1660 SUPER 上 1 万条约 4-6 小时/轮, 先 1 轮看效果)")
     parser.add_argument("--batch_size", type=int, default=16,
                        help="批大小 (ECD 短文本, 16 可提升 GPU 利用率)")
@@ -134,38 +134,35 @@ def load_and_preprocess_data(data_path: str, tokenizer, max_seq_length: int):
     
     # 预处理
     def preprocess(examples):
-        # 支持 ChatML (messages) 和 prompt/reference 两种格式
-        texts = []
+        # 输出 prompt/completion 两列, 配合 completion_only_loss:
+        # loss 只算客服回复部分, 不学习顾客的话 (避免模型变成"对话流生成器")
+        prompts, completions = [], []
         if 'messages' in examples and examples['messages']:
-            # ChatML 格式
+            # ChatML 格式: prompt=对话历史, completion=最后一条 assistant 回复
             for messages in examples['messages']:
-                if messages:
-                    text = tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=False
+                if messages and messages[-1]['role'] == 'assistant':
+                    prompt = tokenizer.apply_chat_template(
+                        messages[:-1], tokenize=False, add_generation_prompt=True
                     )
-                    texts.append(text)
+                    prompts.append(prompt)
+                    completions.append(messages[-1]['content'])
                 else:
-                    texts.append("")
+                    prompts.append("")
+                    completions.append("")
         else:
-            # prompt/reference 格式 -> 包装为对话后套用 chat template
-            prompts = examples.get('prompt') or examples.get('instruction') or []
-            references = (examples.get('reference') or examples.get('answer')
-                          or examples.get('output') or [])
-            for prompt, reference in zip(prompts, references):
-                messages = [
-                    {"role": "user", "content": prompt or ""},
-                    {"role": "assistant", "content": reference or ""},
-                ]
-                text = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=False
+            # prompt/reference 格式
+            qs = examples.get('prompt') or examples.get('instruction') or []
+            refs = (examples.get('reference') or examples.get('answer')
+                    or examples.get('output') or [])
+            for q, r in zip(qs, refs):
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": q or ""}],
+                    tokenize=False, add_generation_prompt=True
                 )
-                texts.append(text)
+                prompts.append(prompt)
+                completions.append(r or "")
         
-        return {"text": texts}
+        return {"prompt": prompts, "completion": completions}
     
     processed_dataset = dataset.map(
         preprocess,
@@ -253,6 +250,7 @@ def setup_training_args(args, num_train_samples=None):
         output_dir=args.output_dir,
         num_train_epochs=args.num_epochs,
         per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         lr_scheduler_type=args.lr_scheduler_type,
@@ -268,7 +266,7 @@ def setup_training_args(args, num_train_samples=None):
         save_total_limit=args.save_total_limit,
         report_to="tensorboard",
         max_length=args.max_seq_length,
-        dataset_text_field="text",
+        completion_only_loss=True,   # 只对回复部分算 loss, 不学习顾客的话
         optim="paged_adamw_8bit" if (args.use_qlora or args.load_in_4bit) else "adamw_torch",
         gradient_checkpointing=args.gradient_checkpointing,
         gradient_checkpointing_kwargs={"use_reentrant": False},
