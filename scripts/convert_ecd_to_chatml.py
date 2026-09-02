@@ -24,6 +24,7 @@
 import argparse
 import json
 import random
+import re
 from pathlib import Path
 
 SYSTEM_PROMPT = "你是一个专业的电商客服，负责解答顾客关于商品、下单、快递、发货、退换货、优惠等问题。"
@@ -39,7 +40,21 @@ def cleanup(text: str) -> str:
     return text.replace(' ', '').replace('\u3000', '').strip()
 
 
-def process_row(parts, min_turns, max_turns, add_system):
+def is_clean_reply(reply: str) -> bool:
+    """回复质量检查: 过滤大杂烩模板/乱码/数字串样本"""
+    if not reply:
+        return False
+    # 连续数字/字母长串 (ID串/乱码, 如 1020102610251022... / ctype / acket)
+    if re.search(r"[0-9A-Za-z]{12,}", reply):
+        return False
+    # 中文字符占比过低 (英文乱码模板)
+    cn = sum(1 for c in reply if '\u4e00' <= c <= '\u9fff')
+    if cn / max(len(reply), 1) < 0.4:
+        return False
+    return True
+
+
+def process_row(parts, min_turns, max_turns, add_system, max_reply_len):
     """将一行 ECD 数据转换为 ChatML 格式, 无效则返回 None"""
     if len(parts) < 3:
         return None
@@ -56,6 +71,13 @@ def process_row(parts, min_turns, max_turns, add_system):
     if turns < min_turns or turns > max_turns:
         return None
 
+    # 回复质量过滤: 短而聚焦的客服回复才是好样本
+    reply = cleanup(response)
+    if len(reply) > max_reply_len:
+        return None  # 大杂烩长模板
+    if not is_clean_reply(reply):
+        return None  # 乱码/数字串/英文模板
+
     messages = []
     if add_system:
         messages.append({"role": "system", "content": SYSTEM_PROMPT})
@@ -64,7 +86,7 @@ def process_row(parts, min_turns, max_turns, add_system):
         role = 'user' if i % 2 == 0 else 'assistant'
         messages.append({"role": role, "content": cleanup(utt)})
 
-    messages.append({"role": "assistant", "content": cleanup(response)})
+    messages.append({"role": "assistant", "content": reply})
     return {"messages": messages}
 
 
@@ -82,6 +104,8 @@ def main():
                         help="最小对话轮次(默认1, 单轮问答也保留)")
     parser.add_argument("--max_turns", type=int, default=30,
                         help="最大对话轮次(默认30, 过滤超长会话)")
+    parser.add_argument("--max_reply_len", type=int, default=60,
+                        help="回复最大字符数(默认60, 过滤大杂烩长模板/乱码/数字串)")
     parser.add_argument("--no_system", action="store_true",
                         help="不加系统提示")
     parser.add_argument("--seed", type=int, default=42,
@@ -112,7 +136,8 @@ def main():
                 skipped_label += 1
                 continue
 
-            item = process_row(parts, args.min_turns, args.max_turns, add_system)
+            item = process_row(parts, args.min_turns, args.max_turns,
+                               add_system, args.max_reply_len)
             if item is None:
                 skipped_invalid += 1
                 continue

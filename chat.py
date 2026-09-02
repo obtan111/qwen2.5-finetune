@@ -93,8 +93,8 @@ def parse_args():
                        help="模型路径 (默认: 最新微调结果, 无则用底座模型)")
     parser.add_argument("--system", type=str, default=DEFAULT_SYSTEM,
                        help="系统提示")
-    parser.add_argument("--max_new_tokens", type=int, default=256,
-                       help="单次最大生成 token 数")
+    parser.add_argument("--max_new_tokens", type=int, default=64,
+                       help="单次最大生成 token 数 (ECD 客服回复普遍短小)")
     parser.add_argument("--temperature", type=float, default=0.6,
                        help="采样温度 (0 = greedy)")
     parser.add_argument("--top_p", type=float, default=0.9)
