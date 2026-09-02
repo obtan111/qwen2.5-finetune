@@ -4,8 +4,8 @@
 加载底座模型或微调后的模型, 在终端交互式对话
 
 用法:
-  python chat.py                                       # 用最新微调结果(无则用底座)
-  python chat.py --model_path ./models/Qwen2.5-0.5B    # 指定用底座模型对比
+  python chat.py                                       # 交互选择: 微调模型 / 原生模型
+  python chat.py --model_path ./models/Qwen2.5-0.5B    # 跳过选择直接指定
   python chat.py --system "自定义系统提示"              # 换角色
 
 对话中命令:
@@ -27,6 +27,44 @@ def find_latest_model(output_root: str = "./output"):
     """找最新微调结果"""
     candidates = sorted(Path(output_root).glob("*_train_*/final"))
     return str(candidates[-1]) if candidates else None
+
+
+def list_models(output_root: str = "./output", base_dir: str = "./models"):
+    """扫描可选模型: [(显示名, 路径), ...]  微调模型在前, 原生模型在后"""
+    models = []
+    # 微调结果: 各训练 run 的 final + 各 epoch checkpoint (新→旧)
+    if Path(output_root).exists():
+        for run in sorted(Path(output_root).glob("*_train_*"), reverse=True):
+            final = run / "final"
+            if (final / "adapter_config.json").exists():
+                models.append((f"微调模型  {run.name}/final", str(final)))
+            for ckpt in sorted(run.glob("checkpoint-*"), reverse=True):
+                if (ckpt / "adapter_config.json").exists():
+                    models.append((f"微调模型  {run.name}/{ckpt.name}", str(ckpt)))
+    # 原生底座模型
+    if Path(base_dir).exists():
+        for d in sorted(Path(base_dir).iterdir(), reverse=True):
+            if d.is_dir() and (d / "config.json").exists():
+                models.append((f"原生模型  {d.name}", str(d)))
+    return models
+
+
+def choose_model(models):
+    """交互选择模型, 返回 (显示名, 路径)"""
+    print("可用模型:")
+    for i, (name, _) in enumerate(models, 1):
+        print(f"  {i}. {name}")
+    print()
+    while True:
+        try:
+            choice = input(f"选择模型编号 (回车=1): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not choice:
+            return models[0]
+        if choice.isdigit() and 1 <= int(choice) <= len(models):
+            return models[int(choice) - 1]
+        print(f"无效输入, 请输入 1~{len(models)} 的编号")
 
 
 def load_model(model_path: str, fp16=True, bf16=False):
@@ -64,9 +102,23 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # 定位模型: --model_path 指定则直接用, 否则交互选择
     if args.model_path is None:
-        args.model_path = find_latest_model() or "./models/Qwen2.5-0.5B"
-    print(f"模型: {args.model_path}")
+        models = list_models()
+        if not models:
+            raise SystemExit("未找到任何模型: 请先下载底座模型或完成一次训练")
+        if len(models) == 1:
+            args.model_path = models[0][1]
+            print(f"模型: {models[0][0]}")
+        else:
+            picked = choose_model(models)
+            if picked is None:
+                print("再见!")
+                return
+            args.model_path = picked[1]
+            print(f"已选择: {picked[0]}")
+    else:
+        print(f"模型: {args.model_path}")
     print(f"提示: /reset 清空历史 | /exit 退出")
     print("-" * 56)
 
