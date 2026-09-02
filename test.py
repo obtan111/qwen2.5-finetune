@@ -229,7 +229,7 @@ def parse_args():
 
     parser.add_argument("--model_path", type=str, default=None,
                        help="训练好的模型路径 (默认: 自动找 output 下最新训练结果)")
-    parser.add_argument("--test_data_path", type=str, default="./data/sample/test.json",
+    parser.add_argument("--test_data_path", type=str, default="./data/ecd/test.jsonl",
                        help="测试数据路径 (jsonl/json 格式)")
     parser.add_argument("--output_dir", type=str, default="./output",
                        help="结果保存根目录")
