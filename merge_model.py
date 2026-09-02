@@ -35,7 +35,7 @@ def find_latest_model(output_root: str = "./output"):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LoRA Merge Tool")
-    parser.add_argument("--model_path", type=str, default=None,
+    parser.add_argument("--model_path", type=str, default="D:\Project\AI_Projects\qwen2.5-finetune\output\ecd_food_train_20260902_latest\final",
                        help="LoRA adapter 路径 (默认: 最新训练结果 final)")
     parser.add_argument("--output_dir", type=str, default=None,
                        help="合并模型保存目录 (默认: models/{run名}-merged)")

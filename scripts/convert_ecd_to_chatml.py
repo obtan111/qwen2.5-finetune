@@ -46,6 +46,12 @@ def is_fact_qa(messages) -> bool:
             return True
     return False
 
+
+# 纯问候消息 (整句只是打招呼, 无其他内容)
+GREETING_RE = re.compile(
+    r'^(在吗|在么|在线吗|在不在|你好|您好|嗨|hello|hi)[\s?？。!！~呀呢哦啊嗯诶]*$'
+)
+
 SYSTEM_PROMPT = "你是一个专业的电商客服，负责解答顾客关于商品、下单、快递、发货、退换货、优惠等问题。"
 
 # 基于脚本位置解析项目根目录, 无论从哪个目录运行都能找到默认文件
@@ -96,6 +102,15 @@ def process_row(parts, min_turns, max_turns, add_system, max_reply_len):
         return None  # 大杂烩长模板
     if not is_clean_reply(reply):
         return None  # 乱码/数字串/英文模板
+
+    # 纯问候(在吗/你好)应短答: 问候问题配长回复 = 话术拼接样本, 剔除
+    last_user = None
+    for i in range(len(session) - 1, -1, -1):
+        if i % 2 == 0:  # 奇数位=顾客
+            last_user = cleanup(session[i])
+            break
+    if last_user and GREETING_RE.match(last_user) and len(reply) > 15:
+        return None
 
     messages = []
     if add_system:
