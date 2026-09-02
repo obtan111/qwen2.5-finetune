@@ -23,22 +23,30 @@ from peft import AutoPeftModelForCausalLM
 DEFAULT_SYSTEM = "你是一个专业的电商客服，负责解答顾客关于商品、下单、快递、发货、退换货、优惠等问题。"
 
 
+def run_sort_key(p):
+    """按路径中的时间戳排序 (YYYYMMDD_HHMMSS), 兼容 run 目录或其子路径(如 final)"""
+    s = str(p).replace("\\", "/")
+    if "_train_" in s:
+        return s.split("_train_")[-1].split("/")[0]
+    return s
+
+
 def find_latest_model(output_root: str = "./output"):
-    """找最新微调结果"""
-    candidates = sorted(Path(output_root).glob("*_train_*/final"))
+    """找最新微调结果 (按时间戳)"""
+    candidates = sorted(Path(output_root).glob("*_train_*/final"), key=run_sort_key)
     return str(candidates[-1]) if candidates else None
 
 
 def list_models(output_root: str = "./output", base_dir: str = "./models"):
-    """扫描可选模型: [(显示名, 路径), ...]  微调模型在前, 原生模型在后"""
+    """扫描可选模型: [(显示名, 路径), ...]  微调模型在前(按时间新→旧), 原生模型在后"""
     models = []
-    # 微调结果: 各训练 run 的 final + 各 epoch checkpoint (新→旧)
+    # 微调结果: 各训练 run 的 final + 各 epoch checkpoint (按时间新→旧)
     if Path(output_root).exists():
-        for run in sorted(Path(output_root).glob("*_train_*"), reverse=True):
+        for run in sorted(Path(output_root).glob("*_train_*"), key=run_sort_key, reverse=True):
             final = run / "final"
             if (final / "adapter_config.json").exists():
                 models.append((f"微调模型  {run.name}/final", str(final)))
-            for ckpt in sorted(run.glob("checkpoint-*"), reverse=True):
+            for ckpt in sorted(run.glob("checkpoint-*"), key=lambda c: c.name, reverse=True):
                 if (ckpt / "adapter_config.json").exists():
                     models.append((f"微调模型  {run.name}/{ckpt.name}", str(ckpt)))
     # 原生底座模型

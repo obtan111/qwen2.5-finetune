@@ -36,9 +36,17 @@ logger = logging.getLogger(__name__)
 
 # ---------- 基础工具 ----------
 
+def run_sort_key(p):
+    """按路径中的时间戳排序 (YYYYMMDD_HHMMSS), 兼容 run 目录或其子路径(如 final)"""
+    s = str(p).replace("\\", "/")
+    if "_train_" in s:
+        return s.split("_train_")[-1].split("/")[0]
+    return s
+
+
 def find_latest_model(output_root: str) -> str:
-    """在 output 根目录下找最新训练 run 的 final 模型"""
-    candidates = sorted(Path(output_root).glob("*_train_*/final"))
+    """在 output 根目录下找最新训练 run 的 final 模型 (按时间戳)"""
+    candidates = sorted(Path(output_root).glob("*_train_*/final"), key=run_sort_key)
     if candidates:
         return str(candidates[-1])
     raise FileNotFoundError(
