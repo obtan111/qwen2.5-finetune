@@ -29,6 +29,23 @@ from pathlib import Path
 
 from analyze_ecd_categories import CATEGORIES
 
+# 事实型 QA 问题模式: 答案因店而异(快递/克重/价格/时效), 学习会导致模型随机拼凑答案
+FACT_QA_PATTERNS = [
+    re.compile(r'什么快递|哪家快递|发什么|哪个快递'),
+    re.compile(r'多少克|几克|多重|净重|一袋多少|一包多少'),
+    re.compile(r'几天到|多久到|几天能到|什么时候到|多长时间'),
+    re.compile(r'多少钱|价格|贵不贵|多少钱一|卖多少'),
+    re.compile(r'什么时候发货|何时发货|几天发|什么时候发'),
+]
+
+
+def is_fact_qa(messages) -> bool:
+    """会话中顾客问了事实型问题 -> True (答案因店而异, 应剔除)"""
+    for m in messages:
+        if m['role'] == 'user' and any(p.search(m['content']) for p in FACT_QA_PATTERNS):
+            return True
+    return False
+
 SYSTEM_PROMPT = "你是一个专业的电商客服，负责解答顾客关于商品、下单、快递、发货、退换货、优惠等问题。"
 
 # 基于脚本位置解析项目根目录, 无论从哪个目录运行都能找到默认文件
@@ -113,6 +130,8 @@ def main():
     parser.add_argument("--category", type=str, default=None,
                         choices=list(CATEGORIES.keys()),
                         help="只保留指定品类的对话 (如 '食品/零食')")
+    parser.add_argument("--drop_fact_qa", action="store_true", default=False,
+                        help="剔除事实型QA(快递/克重/价格/时效等答案因店而异的问题)")
     parser.add_argument("--seed", type=int, default=42,
                         help="随机种子")
     args = parser.parse_args()
@@ -128,6 +147,7 @@ def main():
     skipped_label = 0   # label=0 的负样本
     skipped_invalid = 0  # 格式异常/轮次/质量过滤掉的
     skipped_category = 0  # 不属于指定品类的
+    skipped_fact_qa = 0   # 事实型QA(答案因店而异)
     n_seen = 0           # 已见正样本计数(用于 reservoir)
     pool = []            # reservoir 采样池
 
@@ -155,6 +175,11 @@ def main():
                     skipped_category += 1
                     continue
 
+            # 事实型QA剔除: 答案因店而异, 模型无法判断该用哪个答案
+            if args.drop_fact_qa and is_fact_qa(item['messages']):
+                skipped_fact_qa += 1
+                continue
+
             n_seen += 1
             if max_n is None:
                 pool.append(item)
@@ -173,7 +198,8 @@ def main():
 
     print(f"[done] input={in_path}")
     print(f"  converted={len(pool)} | skipped(label=0)={skipped_label} "
-          f"| skipped(invalid)={skipped_invalid} | skipped(其他品类)={skipped_category}")
+          f"| skipped(invalid)={skipped_invalid} | skipped(其他品类)={skipped_category} "
+          f"| skipped(事实型QA)={skipped_fact_qa}")
     print(f"  saved={out_path}")
 
 
