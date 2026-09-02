@@ -27,6 +27,8 @@ import random
 import re
 from pathlib import Path
 
+from analyze_ecd_categories import CATEGORIES
+
 SYSTEM_PROMPT = "你是一个专业的电商客服，负责解答顾客关于商品、下单、快递、发货、退换货、优惠等问题。"
 
 # 基于脚本位置解析项目根目录, 无论从哪个目录运行都能找到默认文件
@@ -108,6 +110,9 @@ def main():
                         help="回复最大字符数(默认60, 过滤大杂烩长模板/乱码/数字串)")
     parser.add_argument("--no_system", action="store_true",
                         help="不加系统提示")
+    parser.add_argument("--category", type=str, default=None,
+                        choices=list(CATEGORIES.keys()),
+                        help="只保留指定品类的对话 (如 '食品/零食')")
     parser.add_argument("--seed", type=int, default=42,
                         help="随机种子")
     args = parser.parse_args()
@@ -121,7 +126,8 @@ def main():
     max_n = args.max_samples
 
     skipped_label = 0   # label=0 的负样本
-    skipped_invalid = 0  # 格式异常/轮次过滤掉的
+    skipped_invalid = 0  # 格式异常/轮次/质量过滤掉的
+    skipped_category = 0  # 不属于指定品类的
     n_seen = 0           # 已见正样本计数(用于 reservoir)
     pool = []            # reservoir 采样池
 
@@ -142,6 +148,13 @@ def main():
                 skipped_invalid += 1
                 continue
 
+            # 品类过滤: 只保留命中指定品类关键词的对话
+            if args.category:
+                text = ''.join(parts[1:]).replace(' ', '')
+                if not any(w in text for w in CATEGORIES[args.category]):
+                    skipped_category += 1
+                    continue
+
             n_seen += 1
             if max_n is None:
                 pool.append(item)
@@ -159,7 +172,8 @@ def main():
             out.write(json.dumps(item, ensure_ascii=False) + '\n')
 
     print(f"[done] input={in_path}")
-    print(f"  converted={len(pool)} | skipped(label=0)={skipped_label} | skipped(invalid)={skipped_invalid}")
+    print(f"  converted={len(pool)} | skipped(label=0)={skipped_label} "
+          f"| skipped(invalid)={skipped_invalid} | skipped(其他品类)={skipped_category}")
     print(f"  saved={out_path}")
 
 
