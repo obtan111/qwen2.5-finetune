@@ -1,200 +1,175 @@
-# Qwen 2.5 电商客服微调项目
+# Qwen2.5 电商客服微调（ECD · LoRA）
 
-基于真实电商客服对话语料（ECD，淘宝）微调 Qwen2.5-0.5B，提供完整的**训练 → 验证 → 测试对比 → LLM 评审**流程，所有结果本地保存、按运行隔离、互不覆盖。
+基于**淘宝真实客服对话语料（ECD）**微调 Qwen2.5-0.5B 的端到端项目：数据转换 → LoRA 训练 → 三层评估（训练指标 / 生成质量 / LLM 盲评）→ 权重合并 → 对话部署。所有运行结果按时间戳隔离保存，互不覆盖。
 
+> 本项目在 [Luoyifeiandxs/qwen2.5-finetune](https://github.com/Luoyifeiandxs/qwen2.5-finetune)（MIT）基础上深度复现与二次开发。新增内容见「六、我的改进」。
 
+## 一、成果概览
 
----
-
-## 环境（已配置）
-
-| 项 | 值 |
+| 项目 | 结果 |
 |---|---|
-| conda 环境 | `qwen25`（Python 3.10，`conda activate qwen25`） |
-| PyTorch | 2.5.1+cu121 |
-| 关键依赖 | transformers 5.16.1 / trl 1.12.0 / peft 0.20.0 / bitsandbytes 0.50.2 |
-| GPU | GTX 1660 SUPER（6GB，Turing 架构，**不支持 bf16，默认 fp16**） |
-| 底座模型 | `models/Qwen2.5-0.5B`（4.94 亿参数，bf16 原始权重） |
+| 训练数据 | ECD 电商客服对话：train 10,000 条 / eval 4,788 条 / test 952 条 |
+| 底座模型 | Qwen2.5-0.5B（4.94 亿参数，fp16 加载约 1GB 显存） |
+| 训练方式 | LoRA（r=16, α=32），可训练参数 879 万（占全量 1.75%） |
+| 最优配置 | **2 epochs**（3-epoch 出现过拟合，判据见「五、实验结论」） |
+| 测试集指标 | eval_loss 6.27→**2.38**；下一词准确率 0.206→**0.526**；BLEU 0.0015→**0.108** |
+| LLM 盲评 | 微调后胜率 **92.4%**（四维度：相关性 2.41 / 有帮助性 2.13 / 事实性 2.54 / 流畅性 3.13，满分 5） |
+| 部署产物 | LoRA 合并后的完整模型（float16，约 1GB），可直接对话 |
 
----
+> 模型定位：**短句话术型客服**——砍价、快递、库存、简单售后等高频场景应答合格；复杂多轮售后与训练集外问题会答偏/编造（0.5B + 短对话数据的预期内表现，详见「八、评估体系」）。
 
-## 项目结构
+## 二、架构链路
+
+```
+ECD 原始语料（label \t 对话轮次 \t 候选回复）
+  → scripts/convert_ecd_to_chatml.py 转换为 ChatML JSONL
+  → train.py  LoRA 微调（按 epoch 存 checkpoint + train_history.json）
+  → test.py   三层评估（微调前 vs 微调后：指标对比 + 100 条生成对照）
+  → llm_as_judge.py  大模型盲评（可选，四维度打分 + 胜率）
+  → merge_model.py   合并 LoRA 权重 → 完整模型
+  → chat.py   命令行对话体验
+```
+
+## 三、项目结构
 
 ```
 qwen2.5-finetune/
-├── train.py                       # 训练脚本（训练+验证, 每个 epoch 保存检查点）
-├── test.py                        # 测试脚本（微调前后对比: 训练指标/生成质量/性能指标）
-├── llm_as_judge.py                # LLM 盲评脚本（可选, 需 API key）
+├── train.py                       # 训练（LoRA/QLoRA 可选，按 epoch 保存检查点）
+├── test.py                        # 评估（微调前后对比：指标/生成质量/性能）※已加全中文注释
+├── llm_as_judge.py                # LLM 盲评（OpenAI 兼容接口，支持硅基流动/DashScope）
+├── merge_model.py                 # LoRA → 完整模型合并
+├── chat.py                        # 命令行对话（多模型切换、系统提示）
 ├── scripts/
-│   ├── convert_ecd_to_chatml.py   # ECD 原始语料 → ChatML JSONL（直接运行即可）
-│   ├── download_model.py          # 模型下载（HuggingFace/ModelScope）
-│   └── preprocess_data.py         # 通用数据预处理（清洗/去重/格式转换/切分）
+│   ├── convert_ecd_to_chatml.py   # ECD 原始语料 → ChatML JSONL
+│   ├── download_model.py          # 模型下载（HuggingFace / ModelScope 魔搭）
+│   └── preprocess_data.py         # 通用数据预处理
 ├── data/
-│   ├── ecd/                       # 电商客服数据（默认训练数据）
-│   │   ├── train.jsonl            #   30,000 条
-│   │   ├── eval.jsonl             #    4,961 条
-│   │   └── test.jsonl             #      992 条
-│   ├── alpaca_zh/                 # 通用中文指令数据（备选, 43,936 条）
-│   ├── sample/                    # 演示数据（3/2/1 条, 验证流程用）
-│   └── hf_cache/                  # datasets 下载缓存
-├── models/Qwen2.5-0.5B            # 底座模型
-├── dataset/E-commerce dataset/    # ECD 原始语料（train/dev/test.txt, 100万行）
-├── output/                        # 训练/测试输出（见下方目录规则）
-└── docs/工作记录.md               # 完整搭建记录
+│   ├── ecd/                       # 电商客服数据（train_10k.jsonl / eval.jsonl / test.jsonl）
+│   ├── ecd_food/                  # 食品品类数据（备选）
+│   └── sample/                    # 演示数据（3/2/1 条，冒烟测试用）
+├── models/                        # 底座模型 + 合并后模型（gitignore 排除）
+├── output/                        # 训练/测试结果（时间戳隔离，gitignore 排除）
+└── 微调学习笔记.md                 # 全流程学习笔记（踩坑/指标详解/结果记录）
 ```
 
----
+## 四、快速开始
 
-## 快速开始
+### 0. 环境（Windows + conda 已验证）
 
-### 1. 训练（默认 ECD 数据，无需任何参数）
+| 项 | 值 |
+|---|---|
+| conda 环境 | `qwen25`（Python 3.10） |
+| PyTorch | 2.5.1+cu121（CUDA 可用） |
+| 关键依赖 | transformers 5.16.1 / trl 1.12.0 / peft 0.20.0 / bitsandbytes 0.50.2 / datasets 5.0.1 |
+| 显卡 | RTX 3050 Laptop **4GB**（本项目全程 fp16，未用 bf16） |
+
+> ⚠️ Windows 坑：conda 4.x 的 PowerShell 钩子与 PowerShell 7+ 不兼容（`conda activate` 报错），项目命令统一用完整解释器路径：
+> ```powershell
+> D:\miniconda\envs\qwen25\python.exe train.py ...
+> ```
+
+### 1. 数据准备（仓库已带转换后的数据，可跳过）
 
 ```bash
-conda activate qwen25
-python train.py
+# 从 ModelScope 魔搭下载底座模型
+python scripts/download_model.py --source modelscope
+
+# 重新转换 ECD 原始语料（默认抽 3 万条）
+python scripts/convert_ecd_to_chatml.py
 ```
 
-建议先试水 1 个 epoch（约 30~60 分钟）：
+### 2. 训练（推荐 2 epochs）
 
 ```bash
-python train.py --num_epochs 1
+# 冒烟测试：3 条数据验证全流程
+python train.py --data_path ./data/sample/train.json --eval_data_path ./data/sample/eval.json --num_epochs 1
+
+# 正式训练（本项目实测：2 epochs / RTX 3050 4GB / batch 4 / 约 3 小时）
+python train.py --num_epochs 2 --batch_size 4
 ```
 
-**输出**（每次运行独立目录，永不覆盖）：
+**输出**（`output/ecd_train_{时间戳}/`）：`checkpoint-{步数}/`（LoRA，~35MB）、`final/`、`train_history.json`、`eval_results.json`、`training_config.json`。
 
-```
-output/ecd_train_20260902_120000/
-├── checkpoint-1875/          # epoch 1 结束时的 LoRA 权重 (~35MB)
-├── checkpoint-3750/          # epoch 2
-├── checkpoint-5625/          # epoch 3
-├── final/                    # 最终模型（= 最后一个 epoch）
-├── train_history.json        # 完整 loss 曲线 / 学习率记录
-├── eval_results.json         # 验证集结果
-└── training_config.json      # 本次训练的全部参数
-```
-
-> checkpoint 目录名是全局步数（约 1875 步/epoch）。想用某个 epoch 的模型测试：
-> `python test.py --model_path output/ecd_train_xxx/checkpoint-3750`
-
-### 2. 测试（自动对比微调前 vs 微调后）
+### 3. 评估（自动对比微调前 vs 微调后）
 
 ```bash
-python test.py --test_data_path ./data/ecd/test.jsonl --max_gen_samples 100
+python test.py --model_path output/ecd_train_xxx/checkpoint-5000 --test_data_path ./data/ecd/test.jsonl --max_gen_samples 100
 ```
 
-自动完成：找最新训练结果 → 从 adapter 配置定位基座模型 → 两个模型分别评估 → 打印对比表。
+输出 `output/ecd_test_{时间戳}/`：`test_results.json`（全部指标对比）+ `generations_compare.json`（100 条 问题/标准答案/两模型回复，人工抽查用）。
 
-**输出**（`output/ecd_test_{时间戳}/`）：
-
-| 文件 | 内容 |
-|------|------|
-| `test_results.json` | 全部指标 + 微调前后对比 + 提升幅度 |
-| `generations_compare.json` | 每条的 问题 + 标准答案 + 微调前回复 + 微调后回复（人工抽查用） |
-
-**对比表示例**：
-
-```
-指标                        微调前    微调后    变化      说明
-eval_loss                   ...                          ↓好 | 预测损失, 越低预测越准
-eval_mean_token_accuracy    ...                          ↑好 | 下一词预测准确率
-exact_match / bleu / rouge  ...                          ↑好 | 生成与标准答案贴合度
-ttft_ms                     ...                          ↓好 | 首 token 延迟(毫秒)
-prefill_tokens_per_sec      ...                          ↑好 | 输入处理速度, token/秒
-decode_tokens_per_sec       ...                          ↑好 | 输出生成速度, token/秒
-```
-
-### 3. LLM 盲评（可选，需要 API key）
+### 4. LLM 盲评（可选，需 OpenAI 兼容 API key）
 
 ```bash
-set LLM_API_KEY=sk-xxx
-python llm_as_judge.py                # 默认阿里云 DashScope + qwen-max 当评审
+python llm_as_judge.py --api_base https://api.siliconflow.cn/v1 --api_key sk-xxx --judge_model Qwen/Qwen2.5-72B-Instruct --max_samples 100
 ```
 
-随机打乱 A/B 位置盲评微调前后回复，按 **相关性/有帮助性/事实性/流畅性** 四维度打分（1-5），输出平均分和胜率到 `llm_judge_results.json`。
+自动读取最新 `generations_compare.json`，随机打乱 A/B 后按 **相关性 / 有帮助性 / 事实性 / 流畅性**（1-5 分）评审并判胜者，输出 `llm_judge_results.json`。
 
----
+### 5. 合并权重（部署前必做）
 
-## 训练参数
+```bash
+python merge_model.py --model_path output/ecd_train_xxx/checkpoint-5000
+```
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--model_path` | `./models/Qwen2.5-0.5B` | 底座模型 |
-| `--data_path` / `--eval_data_path` | `./data/ecd/train.jsonl` / `eval.jsonl` | ECD 数据 |
-| `--num_epochs` | 3 | 看 eval_loss 回升则降为 2 |
-| `--batch_size` × `--gradient_accumulation_steps` | 8 × 2 | 有效 batch 16，显存约 3~4GB，OOM 则降到 4 |
-| `--learning_rate` | 2e-4 | LoRA 经典区间 1e-4~3e-4 |
-| `--max_seq_length` | 1024 | ECD 最长样本约 1000 token，全覆盖且省显存 |
-| `--lora_r / alpha / dropout` | 16 / 32 / 0.05 | 客服单一风格任务 r=16 足够 |
-| `--fp16` / `--bf16` | True / False | **GTX 1660 SUPER 不支持 bf16，勿开** |
-| `--save_strategy` | epoch | 每个 epoch 保留一份权重 |
-| `--save_total_limit` | 不限 | LoRA 检查点每个仅 ~35MB |
-| `--logging_steps / --eval_steps` | 50 / 500 | 总步数约 5600，每轮验证 3~4 次 |
-| `--use_qlora` | False | 0.5B fp16 仅 1GB，无需量化；换 3B+ 模型时开启 |
+⚠️ **必须显式传 `--model_path`**：脚本默认值是作者电脑上的路径（非自动查找），不带参数会报 `Not a LoRA adapter`。合并原理 `W' = W + B·A`（数学无损），几秒完成，输出 `models/{run名}-merged/`。
 
-**训练时长预估**：约 1.5~3 小时（3 epochs / 3 万条 / GTX 1660 SUPER）。
+### 6. 对话体验
 
----
+```bash
+python chat.py --model_path ./models/ecd_train_xxx-merged
+```
 
-## 评估体系（三层）
+## 五、实验结论（2-epoch 最优，3-epoch 过拟合）
+
+| 观察点 | Epoch 1 → 2 | Epoch 3 |
+|---|---|---|
+| eval_loss | 2.523 → **2.349**（step 5000 全周期最低） | step 5250 跳涨至 2.548，后平台震荡 2.50~2.52 |
+| 验证准确率 | 0.492 → 0.527（持续上升） | 卡死 0.526 |
+| 训练 loss | 2.72 → 1.94 | 猛降至 ~1.3（开始背训练集） |
+| 验证熵 | 2.45 → 2.10 | 骤降至 1.60（过度自信） |
+
+**过拟合判据**：训练 loss 继续降 + 验证 loss 回升 + 验证熵骤降 = 模型开始背训练集而非学规律。**正式成果选用 checkpoint-5000（2-epoch）**，并在独立测试集（952 条，模型未见过）上验证：所有质量指标优于 1-epoch。
+
+## 六、我的改进（相对上游）
+
+1. **3-epoch 过拟合实验**：完整训练 3 轮并记录每步指标，用数据驱动选定最优 checkpoint，而非默认用 final
+2. **独立测试集验证 + LLM 盲评体系**：搭建"指标对比 + 大模型四维盲评"双通道评估，胜率 92.4% 基线存档，可复现可对比
+3. **test.py 全中文注释**：逻辑零改动（AST 对比验证），逐函数解释"在做什么、为什么"
+4. **踩坑记录沉淀**：torch 清华源为 CPU 版、conda×PowerShell 7 不兼容、merge_model 默认路径、LoRA 推理开销等（见下）
+
+## 七、踩坑记录
+
+| 问题 | 原因 | 解决 |
+|---|---|---|
+| `torch.cuda.is_available()` 为 False | 清华 pip 源默认 torch 为 CPU 版 | 直接下载阿里云 cu121 wheel 安装 |
+| `conda activate` 报 `Invoke-Expression: Missing argument` | conda 4.12 钩子与 PowerShell 7+ 不兼容 | 用 `D:\miniconda\envs\qwen25\python.exe` 完整路径跑命令 |
+| `merge_model.py` 报 `Not a LoRA adapter` | 默认 `--model_path` 是作者电脑路径 | 显式传 `--model_path` |
+| `chat.py` 报 transformers ImportError | 误用系统 Python 3.11（非 qwen25 环境） | 统一用 qwen25 解释器 |
+| OOM（显存不足） | batch 过大 / 模型过大 | 降 `--batch_size 4` 或开 `--use_qlora` |
+| bf16 报错 | RTX 3050/1660（Turing/Ampere 前代）不支持 bf16 | 保持 `--fp16 True --bf16 False` |
+
+## 八、评估体系（三层）
 
 | 层次 | 指标 | 视角 |
-|------|------|------|
-| 训练指标 | eval_loss ↓ / token_accuracy ↑ / entropy | 模型内部收敛性 |
+|---|---|---|
+| 训练指标 | eval_loss ↓ / token_accuracy ↑ / entropy ↓ | 模型内部收敛性 |
 | 生成质量 | exact_match / BLEU / ROUGE-1 / ROUGE-L ↑ | 与标准答案贴合度 |
-| 性能指标 | TTFT ↓ / prefill & decode 吞吐 ↑ | 部署延迟与速度 |
+| 性能指标 | TTFT ↓ / prefill & decode 吞吐 ↑ | 部署延迟与速度（LoRA 加载有开销，合并后恢复原生速度） |
 | LLM 盲评 | 四维度打分 + 胜率 | 业务质量（可选） |
 | 人工抽查 | generations_compare.json | 业务视角 |
 
----
+盲评判卷规律：简短确认类（"看见订单了么"→"看到了哦"）4 分；信息咨询类 3 分（答得出但生硬）；复杂售后/抱怨类 1-2 分（只能挤出安抚短句）。**有帮助性（2.13）最弱** = 后续提升的第一线索。
 
-## 数据说明
+## 九、后续路线
 
-**ECD 电商客服数据**（默认）：源自淘宝真实客服对话。原始格式为检索式（`label \t 对话轮次 \t 候选回复`），已由 `scripts/convert_ecd_to_chatml.py` 转换为生成式 ChatML：
+- [ ] 全量 3 万条数据训练（`data/ecd/train.jsonl`），覆盖更多盲区
+- [ ] Qwen2.5-1.5B + QLoRA（4-bit 量化加载，4GB 显存可跑）
+- [ ] 长回复训练（针对复杂售后场景）或回答信息增强
+- [ ] FastAPI 服务化部署 + 监控日志
 
-- 只保留 `label=1` 正样本，丢弃负样本
-- 去除分词空格恢复连续中文
-- 奇数位=user（顾客）、偶数位=assistant（客服）
-- 自动附加电商客服 system prompt
-- 支持随机抽样（`--max_samples`，默认 30000）
+## 十、致谢与协议
 
-重新转换 / 扩大数据量：
-
-```bash
-python scripts/convert_ecd_to_chatml.py                          # 默认: 抽 3 万条
-python scripts/convert_ecd_to_chatml.py --max_samples 100000     # 抽 10 万条
-```
-
-**换数据训练**：
-
-```bash
-python train.py --data_path ./data/alpaca_zh/train.jsonl --eval_data_path ./data/alpaca_zh/eval.jsonl
-```
-
----
-
-## 常见问题
-
-**Q: 报错 bf16 / mat1 and mat2 dtype 不一致？**
-GTX 1660 SUPER（Turing）不支持 bf16，保持 `--fp16=True --bf16=False`（默认已如此）。
-
-**Q: 显存不足（OOM）？**
-降低 `--batch_size 4` 或开启 `--use_qlora`（4-bit 量化加载）。
-
-**Q: HuggingFace 下载失败/卡住？**
-使用镜像并禁用 Xet：
-```bash
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HUB_DISABLE_XET=1
-```
-
-**Q: 训练结果会被覆盖吗？**
-不会。每次训练/测试都写入 `output/{数据集名}_{train|test}_{时间戳}/` 独立目录。
-
-**Q: transformers 5.x 的 `torch_dtype` 弃用警告？**
-无害，可忽略；如遇兼容问题可降级 `pip install "transformers>=4.35,<5"`（注意 warmup_ratio/max_length 等 API 需同步回退）。
-
----
-
-## License
-
-MIT License
+- 上游项目：[Luoyifeiandxs/qwen2.5-finetune](https://github.com/Luoyifeiandxs/qwen2.5-finetune)（MIT）
+- 训练数据：ECD 电商客服语料（淘宝真实对话，版权归原作者）
+- 本项目遵循 MIT License
