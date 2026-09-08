@@ -120,6 +120,29 @@ python merge_model.py --model_path output/ecd_train_xxx/checkpoint-5000
 python chat.py --model_path ./models/ecd_train_xxx-merged
 ```
 
+### 训练参数速查（train.py 全部可调参数）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--model_path` | `./models/Qwen2.5-0.5B` | 底座模型路径 |
+| `--data_path` | `./data/ecd/train_10k.jsonl` | 训练数据（全量 3 万条用 `./data/ecd/train.jsonl`） |
+| `--eval_data_path` | `./data/ecd/eval.jsonl` | 验证数据 |
+| `--max_seq_length` | 1024 | 最大序列长度（ECD 最长约 1000 token） |
+| `--num_epochs` | 3 | 训练轮数；**本项目实测 2 轮最优**（3 轮过拟合，见「五」） |
+| `--batch_size` | 16 | 批大小；**4GB 显存实测用 4** |
+| `--learning_rate` | 2e-4 | LoRA 经典区间 1e-4~3e-4 |
+| `--lr_scheduler_type` | cosine | 学习率调度（cosine 带 warmup 平滑收敛） |
+| `--warmup_ratio` / `--weight_decay` | 0.05 / 0.01 | 预热比例 / 权重衰减 |
+| `--gradient_accumulation_steps` | 1 | 梯度累积（小 batch + 累积 = 等效大 batch） |
+| `--lora_r` / `--lora_alpha` / `--lora_dropout` | 16 / 32 / 0.05 | LoRA 秩 / 缩放 / 丢弃（单一风格任务 r=16 足够） |
+| `--use_qlora` / `--load_in_4bit` / `--load_in_8bit` | False | 量化加载；换 3B+ 模型时开启 |
+| `--fp16` / `--bf16` | True / False | **RTX 3050 不支持 bf16，勿开** |
+| `--save_strategy` / `--save_total_limit` | epoch / 不限 | 检查点保存策略（每个 ~35MB） |
+| `--logging_steps` / `--eval_steps` | 50 / 250 | 日志 / 验证间隔 |
+| `--gradient_checkpointing` | True | 显存不足时开启（已默认） |
+
+> **实际生效参数**：每次训练都会把全部参数存档到 `output/ecd_train_{时间戳}/training_config.json`——跑完想复盘"这次到底用了什么配置"，直接看这个文件。
+
 ## 五、实验结论（2-epoch 最优，3-epoch 过拟合）
 
 | 观察点 | Epoch 1 → 2 | Epoch 3 |
