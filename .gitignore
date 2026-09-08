@@ -72,3 +72,6 @@ wandb/
 # Temporary files
 *.tmp
 *.log
+
+# 学习笔记（个人使用，不入库）
+微调学习笔记.md
